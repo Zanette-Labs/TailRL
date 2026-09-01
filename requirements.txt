@@ -1,0 +1,16 @@
+# Core (pin torch/torchvision to a build matching your CUDA runtime; see README)
+torch>=2.1
+torchvision>=0.16
+numpy>=1.24
+pyyaml>=6.0
+pillow>=9.5
+
+# Analysis + figures
+pandas>=2.0
+matplotlib>=3.7
+
+# Experiment tracking (optional at runtime — training runs fine without --wandb)
+wandb>=0.16
+
+# Tests
+pytest>=7.4

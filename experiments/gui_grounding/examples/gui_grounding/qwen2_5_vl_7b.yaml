@@ -1,0 +1,244 @@
+# =============================================================================
+# Qwen2.5-VL-7B x GTA1 (FULL corpus, 70,688 rows) x SE-GUI dense point reward
+#   x {TailRL, GRPO, RLOO} estimator comparison.  Evaluated post-hoc on ScreenSpot-Pro.
+# Hardware this was run on: 1 node x 4 GH200 (96 GB HBM3, aarch64).
+#
+# The arms differ in EXACTLY ONE flag: algorithm.adv_estimator, overridden on the CLI.
+# Everything else -- data order (data.seed), reward, optimizer, schedule -- is identical.
+#
+# PROTOCOL = SE-GUI's (Yuan et al., NeurIPS 2025), not this repo's previous 7B protocol:
+#   B = 8 prompts/step, G = 8 rollouts, lr 1e-6, LINEAR decay to 0, T = 1.0, no KL,
+#   pure on-policy vanilla PG. MEASURED corpus = 70,528 rows (the handover spec's 70,688 was
+#   off by 160), so 70,528 / 8 = 8,816 steps/epoch x 3 epochs = 26,448 steps.
+#
+# CRITICAL INVARIANT (unchanged from the 7B line): data.min/max_pixels == the reward's
+#   min/max_pixels == the eval harness's pixels (NATIVE: 3,136 / 12,845,056 = a 16,384
+#   image-token cap). The reward maps the model's resized-pixel click into the GT's [0,1000]
+#   frame using exactly these bounds; if they drift the rescale is silently wrong.
+# =============================================================================
+data:
+  train_files: ${oc.env:GUI_DATA_DIR,./data/gui}/gta1_train.parquet
+  val_files: ${oc.env:GUI_DATA_DIR,./data/gui}/screenspot_pro.parquet
+  image_dir: ${oc.env:GUI_IMAGE_DIR,./gui_images}   # holds gta1_images/ + screenspot_pro/
+  prompt_key: problem
+  answer_key: answer          # -> renamed to "ground_truth" (JSON {"bbox"[0,1000],"wh"}) for the reward
+  image_key: images
+  video_key: videos
+  video_fps: 2.0
+  # Sized to the SS-Pro END-OF-TRAINING validation pass (16,320 image tokens + text), not to train
+  # (which tops out at 9,000 image tokens on GTA1). val_freq is -1, but ray_trainer runs one final
+  # validation unconditionally, and with filter_overlong_prompts false an undersized value would
+  # silently truncate those val image tokens.
+  max_prompt_length: 17408
+  max_response_length: 256    # direct point output, no chain-of-thought
+  # SE-GUI protocol: 8 prompts per optimizer step (x rollout.n = 8 -> 64 rollouts/step).
+  rollout_batch_size: 8
+  mini_rollout_batch_size: null
+  val_batch_size: 64
+  # SAME prompt as the 3B arms -- measured, not assumed. On the 7B base, full 1,581, greedy:
+  #   gui_point_v2   0.290   <- top of the 0.26-0.29 target band
+  #   gta1_point_v2  0.275   (same shape + resolution clause: HURTS at 7B)
+  #   official       0.271   (computer_use protocol)
+  #   gta1_point     0.257   (just under band)
+  #   naive bbox     0.156
+  # Notable: adding the resolution declaration now HURTS 7B, inverting the old gta1_point-vs-naive
+  # finding -- the verbose user turn supplies what the declaration was compensating for. One prompt
+  # winning at both scales makes the 3B-vs-7B comparison clean.
+  #
+  # Original 3B ablation (system persona x user-turn phrasing), scored on the
+  # full 1,581-item SS-Pro set AND on sampled-rollout format compliance, because greedy accuracy
+  # alone is misleading -- training rollouts are SAMPLED at T=1.0:
+  #                       SS-Pro greedy   format@T=1   dead rollouts   bimodal_frac
+  #   gta1_point (spec)      0.1151         0.939          9.1%           0.029
+  #   gui_point_sys          0.1240         0.943          8.4%           0.016
+  #   gui_point              0.1739         0.556         46.1%           0.179
+  #   gui_point_v2  <-       0.1999         0.875         12.5%           0.062
+  # The system persona is what buys format compliance (0.94 vs 0.56), independent of the
+  # resolution clause; the verbose user turn is what buys grounding accuracy. v2 combines them and
+  # dominates on every axis. 0.1999 also sits essentially on the pre-registered 0.190 +/- 0.02
+  # anchor. NOTE 7B goes the OTHER way on the resolution declaration (0.156 -> 0.257): the prompt
+  # is a per-model choice, not a protocol constant. See gates/G1.md and errata E16/E19.
+  # The model emits pixel coordinates in the frame it actually sees; the reward maps them into the
+  # GT's [0,1000] frame via _to_norm -- identical machinery for every candidate here.
+  format_prompt: ./examples/format_prompt/gui_point_v2.jinja
+  override_chat_template: null
+  shuffle: true
+  seed: 1
+  # NATIVE resolution, one frame end to end (see the invariant above).
+  min_pixels: 3136
+  max_pixels: 12845056
+  # NO-OP at native res (the 16,384-token image cap keeps every train prompt under
+  # max_prompt_length) that would cost a ~15 min decode of all ~70k images at startup AND on every
+  # chained-resume, for zero drops.
+  filter_overlong_prompts: false
+algorithm:
+  # EXACT strings (core_algos.py::AdvantageEstimator). Overridden per arm on the CLI:
+  #   grpo -> (r - mean) / std   rloo -> leave-one-out baseline   tailrl -> gap-over-survivors
+  adv_estimator: grpo
+  disable_kl: true             # KL OFF: SE-GUI keeps a beta, we do not (recorded in errata.md)
+  use_kl_loss: false           # KL OFF
+  kl_penalty: low_var_kl
+  kl_coef: 0.0                 # KL OFF (reference policy unused)
+  online_filtering: false      # the estimator comparison must see the SAME batches in every arm
+  filter_key: overall
+  # Inert while online_filtering is false, but these are compared against the RAW group-mean
+  # reward, so they must be on the reward's own scale. Left at the [0,1]-era 0.99 they would
+  # discard every well-graded group the moment anyone switched filtering on.
+  filter_low: 0.01
+  filter_high: 2.49
+worker:
+  actor:
+    # global_batch_size is in PROMPTS and is multiplied by rollout.n internally
+    # (fsdp_workers.py: `config.global_batch_size *= self.config.rollout.n`), so 8 x 8 = 64 ==
+    # the whole rollout batch => exactly ONE optimizer update per step, strictly on-policy.
+    global_batch_size: 8
+    # 2/4 == the 3B arms. Raised from 1/2 after the G0 gate measured 51.9 GB peak of 95.08 (45%
+    # headroom) -- the 1/2 was sized for a model we were not yet sure would fit. Mathematically
+    # EXACT, not an approximation: dp_actor normalises each micro-batch by the all-reduced
+    # total_response_tokens, so the accumulated gradient is identical however the mini-batch is cut
+    # (pinned by tests/segui/test_skip_old_log_prob.py). The win is communication -- FSDP
+    # FULL_SHARD all-gathers params per micro-batch in BOTH forward and backward, so halving the
+    # micro-batch count halves that traffic.
+    micro_batch_size_per_device_for_update: 2
+    micro_batch_size_per_device_for_experience: 4
+    # SPIKE GUARD ONLY (deviation from the 7B line's 1.0, recorded in errata.md): at 1.0 the clip
+    # binds on essentially every step, which silently rescales the gradient and makes the arms
+    # differ in *step size* as well as in advantage. 100 lets the estimators' natural scales
+    # through and still catches a blow-up. actor/grad_norm_clipped logs whether it ever binds.
+    max_grad_norm: 100.0
+    loss_type: vanilla           # pure policy gradient, NO PPO ratio clipping
+    ppo_epochs: 1                # single epoch -> on-policy (importance ratio == 1); exact PG
+    # Drop the separate old-log-prob forward pass: measured 4.74 s of a 23.9 s step (20%) on the G0
+    # gate. Sound ONLY because ppo_epochs=1 + loss_type=vanilla + no KL means the ratio is
+    # identically 1; dp_actor substitutes log_probs.detach(), which evaluates to ratio 1.0 while
+    # still differentiating to d(log pi), giving the EXACT REINFORCE gradient. Rejected at config
+    # time by validate_skip_old_log_prob outside that regime. Entropy is unaffected -- both
+    # actor/entropy and entropy_loss read log_probs, never old_log_probs.
+    skip_old_log_prob: true
+    padding_free: true
+    dynamic_batching: true
+    ulysses_size: 1              # MUST stay 1: Ulysses sequence parallelism is incompatible with the VLM path
+    model:
+      model_path: ${oc.env:BASE_MODEL,Qwen/Qwen2.5-VL-7B-Instruct}
+      # MUST stay true. Turning it off was tried and OOMs on the worst-case batch: the G0 gate's
+      # 45% headroom is measured on MEDIAN images (2,691 image tokens), but GTA1's largest are
+      # 9,000, and `max_input_len` is the PADDED length, so ONE large sample sets the token budget
+      # for its whole mini-batch. 0.75% of samples exceed 8,192 tokens => ~5.9% of batches, i.e.
+      # ~1,560 of 26,448 steps, run at near-worst-case load. Job 2877070 died on the FIRST update
+      # micro-batch of an all-9,000-token batch (940 MiB short of 95.08 GB). Recompute is what keeps
+      # activations bounded there. See docs/segui/errata.md E23.
+      enable_gradient_checkpointing: true
+      trust_remote_code: false
+      # SE-GUI trains the ViT. Kept false to match the 3B arms, so the two scales differ only in
+      # model size. HIGHER RISK than at 3B: the previous 7B line froze it for memory, and 7B at
+      # native resolution with the ViT unfrozen is the most likely thing to OOM. G0 must validate
+      # this before the arms launch; the fallback is true, recorded in errata.md.
+      freeze_vision_tower: false
+      lora:
+        rank: 0                # 0 = full fine-tune (headline)
+        alpha: 64
+        target_modules: all-linear
+        exclude_modules: .*visual.*
+    optim:
+      lr: 1.0e-6
+      weight_decay: 1.0e-2
+      strategy: adamw_bf16
+      # HF/TRL default schedule, which SE-GUI's fork inherits unmodified: warmup (none) then a
+      # straight line to 0 at training_steps. UNLIKE "constant" this has a HORIZON baked into the
+      # slope -- total_epochs must not change mid-run or a resumed slice jumps to a different lr.
+      lr_scheduler_type: linear
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true     # ZeRO-3-equivalent full shard
+      enable_cpu_offload: false   # flip true first on OOM
+      enable_rank0_init: true
+      torch_dtype: bf16
+    offload:
+      offload_params: false
+      offload_optimizer: true     # fp32 moments to Grace CPU over the 900 GB/s C2C link: nearly free
+  rollout:
+    n: 8                       # SE-GUI group size G
+    temperature: 1.0           # SE-GUI hardcodes T=1 for generation
+    top_p: 1.0
+    limit_images: 1
+    gpu_memory_utilization: 0.4
+    enforce_eager: false
+    enable_chunked_prefill: false
+    # Hard requirement with enable_chunked_prefill=false: >= max_prompt_length +
+    # max_response_length (17,408 + 256 = 17,664). This also becomes the rollout's max_model_len.
+    max_num_batched_tokens: 18432
+    tensor_parallel_size: 1
+    # true: the per-step vLLM/Ray progress bars are the ~1.4 GB/hour of stderr that filled
+    # the /projects quota. Nothing reads them -- training metrics go to experiment_log.jsonl
+    # and W&B -- so this is pure log volume.
+    disable_tqdm: true
+    # The single end-of-training validation pass is GREEDY, so it is comparable across arms and is
+    # not flattered by a collapsed (low-entropy) policy the way temperature sampling would be. The
+    # headline numbers come from scripts/eval_screenspot_pro.py on the actor_only ladder regardless.
+    val_override_config: {temperature: 0.0, top_p: 1.0, n: 1}
+  ref:
+    fsdp: {enable_full_shard: true, enable_cpu_offload: true, enable_rank0_init: true}
+    offload: {offload_params: false}
+  reward:
+    reward_function: ./examples/reward_function/segui_point.py:compute_score
+    reward_function_kwargs:
+      format_weight: 0.5       # ADDITIVE: overall = point + 0.5 * format, so overall spans [0, 2.5]
+      min_pixels: 3136         # MUST equal data.min/max_pixels (native)
+      max_pixels: 12845056
+    # DIAGNOSTICS ONLY -- nothing rescales the reward and no estimator sees this. It is the span of
+    # `overall` once the format term is earned, so the group shape tests (mid-band mass, bimodality)
+    # read on a comparable 0-1 scale: (overall - 0.5) / 2 == point / 2 exactly.
+    reward_range: [0.5, 2.5]
+trainer:
+  # 3 epochs = 26,448 steps, MATCHING the 3B arms exactly.
+  #
+  # This is set by the lr schedule, not by a compute budget. `linear` takes training_steps from
+  # total_epochs and bakes it into the slope, so a 1-epoch 7B run would anneal over 8,816 steps
+  # while the 3B arms anneal over 26,448 -- at step 8,000 the 7B would sit at 0.09e-6 against the
+  # 3B's 0.70e-6, i.e. 13% of its learning rate. Step-for-step cross-scale comparison would then be
+  # confounded by schedule position rather than by scale. Same horizon => identical lr at every
+  # step => the only difference between the two lines is model size.
+  #
+  # Cost of that choice: ~12.1 days/arm at the estimated 39 s/step, vs 4.0 for one epoch.
+  total_epochs: 3
+  max_steps: null              # null so total_epochs drives length; the sbatch must not force a cap
+  project_name: segui_gta1_gos_7b_v1
+  experiment_name: qwen25vl7b_gta1_seguireward_grpo   # SLURM overrides per arm
+  logger: ["file", "wandb"]
+  nnodes: 1
+  n_gpus_per_node: 4           # 4 GPUs/node as run. The sbatch --gres MUST match this.
+  max_try_make_batch: 20
+  # NO in-training validation: at 26,508 steps an SS-Pro pass every N steps would dominate the
+  # budget, and the greedy post-hoc ladder over the actor_only exports is both cheaper and the
+  # protocol-correct measurement. ray_trainer still runs ONE final validation when a run reaches
+  # 26,508, which is the only in-trainer number reported.
+  val_freq: -1
+  val_before_train: false      # else every resumed 47h slice re-pays a full SS-Pro pass
+  val_only: false
+  val_generations_to_log: 3
+  # RESUME track: paired full-state saves every 100 steps (99,100 / 199,200 / ...), keeping only the
+  # last 2. Adjacent pair => an unloadable newest checkpoint costs 1 step on the load-fallback.
+  save_freq: 100
+  save_paired: true
+  save_limit: 2
+  save_model_only: false
+  # EVAL track: actor_only bf16 HF exports, exempt from the save_limit prune. This is the ladder
+  # every post-hoc greedy / pass@k number is computed on, so its shape IS the experiment's
+  # resolution in time: dense through the separation window (first ~2,000 steps, where the
+  # estimators are expected to diverge), sparse afterwards, plus every epoch boundary and every
+  # step in the sampled-eval matched set. 21 exports/arm x ~7.5 GB ~= 158 GB/arm.
+  # IDENTICAL to the 3B ladder (21 rungs), which is the point: the 3B-vs-7B comparison is only
+  # apples-to-apples if both scales are measured at the same steps. It was briefly thinned to 10
+  # when bgmo was the only storage available (21 rungs x 15.2 GB x 3 arms = 1,008 GB against
+  # ~965 GB free); with bgyb/bgyc/bgyd opened up each arm gets its own ~1.07 TB account and needs
+  # only 454 GB, so the dense early window is affordable again.
+  #
+  # Union of extra_save_steps, the export_actor_only_freq=4000 cadence, and the forced final export
+  # at 26,448 -> 21 rungs, the SAME rungs as the 3B arms so both scales are measured at the same
+  # steps.
+  export_actor_only: true
+  export_actor_only_freq: 4000
+  extra_save_steps: [100, 200, 300, 400, 500, 600, 800, 1000, 1500, 2000, 4000, 8816, 13000, 17632, 22000]
+  save_checkpoint_path: null   # set by the launcher from $CKPT_ROOT; keep checkpoints off any small quota
+  load_checkpoint_path: null
+  find_last_checkpoint: true

@@ -1,0 +1,39 @@
+# GUI-grounding experiment. Install torch FIRST, matched to your CUDA runtime (see README), then:
+#   pip install -r requirements.txt
+#
+# vLLM and flash-attn build against your torch/CUDA, so letting pip resolve torch as a transitive
+# dependency of vllm is how you end up with a torch that does not match your driver.
+
+# --- RL framework (the vendored verl fork imports these) ---
+accelerate
+codetiming
+datasets
+omegaconf
+peft
+pyarrow>=15.0.0
+qwen-vl-utils
+ray[default]
+tensordict
+torchdata
+# 4.54+ for the Qwen2.5-VL processor path the coordinate invariant depends on; <5 because the
+# checkpoint format changes.
+transformers>=4.54.0,<5.0.0
+
+# --- rollout + attention ---
+flash-attn>=2.4.3
+vllm>=0.8.0
+
+# --- reward, data, analysis ---
+numpy
+pandas
+pillow
+# analysis/curves.py and scripts/eval_screenspot_pro.py use scipy.special.gammaln for the unbiased
+# best_reward@k weights.
+scipy
+
+# --- optional: experiment tracking. Training runs fine without it (the configs also log to file);
+# credentials come from `wandb login`, never from this repository.
+wandb
+
+# --- tests ---
+pytest>=7.4

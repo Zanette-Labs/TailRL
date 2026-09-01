@@ -1,0 +1,62 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# --- Local configuration (never commit real paths / credentials) ---
+.env
+*.env
+!.env.example
+.netrc
+
+# --- Credentials: belt-and-braces. Nothing of this shape belongs in the repo. ---
+*.pem
+*.key
+*_rsa
+*_ed25519
+id_rsa*
+id_ed25519*
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# --- Experiment outputs ---
+results/
+outputs/
+figures/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# --- Generated SLURM job scripts (regenerate with sweep.py / scripts/gen_*.sh) ---
+experiments/*/sweep_scripts/
+slurm-*.out
+*.out
+
+# --- Editors / OS ---
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# --- Text-Maze experiment: built datasets and run outputs ---
+# The 1000-maze evaluation split under data/eval1000/ IS committed; everything
+# else under data/ is rebuilt by scripts/prepare_dataset.sh (~5 GB).
+experiments/text_maze/data/*
+!experiments/text_maze/data/eval1000/
+experiments/text_maze/runs/
+
+# --- Code-optimization experiment: downloads, the gem5 build, and run outputs ---
+# All of it is produced by scripts/{download_data,prepare_dataset,setup_gem5}.sh.
+experiments/code_optimization/data/
+experiments/code_optimization/gem5/build/
+experiments/code_optimization/runs/

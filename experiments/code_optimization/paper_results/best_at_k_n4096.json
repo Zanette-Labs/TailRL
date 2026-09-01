@@ -1,0 +1,117 @@
+{
+ "task": "PIE C++ runtime optimization (gem5 speedup x correctness reward)",
+ "split": "test",
+ "n_prompts": 878,
+ "n_rollouts_per_prompt": 4096,
+ "k_values": [
+  1,
+  4,
+  16,
+  64,
+  256,
+  1024
+ ],
+ "sampling": {
+  "temperature": 0.6,
+  "top_p": 0.95,
+  "top_k": -1,
+  "max_new_tokens": 4096
+ },
+ "reward": {
+  "kind": "ratio",
+  "definition": "src_gem5_ticks / rollout_gem5_ticks if the rollout passes every usable test case, else 0",
+  "k_timed_cases": 1,
+  "case_select": "biggest",
+  "budget_mult": 3.0
+ },
+ "estimators": {
+  "tailrl_step300": {
+   "method": "tailrl",
+   "checkpoint_step": 300,
+   "n_prompts": 878,
+   "n_rollouts": 4096,
+   "best_reward_at_k": {
+    "1": 3.75756,
+    "4": 5.508528,
+    "16": 6.449159,
+    "64": 7.008886,
+    "256": 7.42785,
+    "1024": 7.738275
+   },
+   "pass_at_k": {
+    "1": 0.550769,
+    "4": 0.754059,
+    "16": 0.841269,
+    "64": 0.881584,
+    "256": 0.90008,
+    "1024": 0.910543
+   }
+  },
+  "grpo_step500": {
+   "method": "grpo",
+   "checkpoint_step": 500,
+   "n_prompts": 878,
+   "n_rollouts": 4096,
+   "best_reward_at_k": {
+    "1": 0.976856,
+    "4": 0.977671,
+    "16": 0.978467,
+    "64": 0.979171,
+    "256": 0.979437,
+    "1024": 0.97944
+   },
+   "pass_at_k": {
+    "1": 0.976951,
+    "4": 0.977732,
+    "16": 0.978527,
+    "64": 0.979231,
+    "256": 0.979496,
+    "1024": 0.979499
+   }
+  },
+  "rloo_step500": {
+   "method": "rloo",
+   "checkpoint_step": 500,
+   "n_prompts": 878,
+   "n_rollouts": 4096,
+   "best_reward_at_k": {
+    "1": 0.950994,
+    "4": 0.953213,
+    "16": 0.954251,
+    "64": 0.954936,
+    "256": 0.955452,
+    "1024": 0.955527
+   },
+   "pass_at_k": {
+    "1": 0.951086,
+    "4": 0.953269,
+    "16": 0.954304,
+    "64": 0.954989,
+    "256": 0.955506,
+    "1024": 0.955581
+   }
+  },
+  "base_step0": {
+   "method": "base",
+   "checkpoint_step": 0,
+   "n_prompts": 878,
+   "n_rollouts": 4096,
+   "best_reward_at_k": {
+    "1": 0.290084,
+    "4": 0.60685,
+    "16": 0.941342,
+    "64": 1.249746,
+    "256": 1.550088,
+    "1024": 1.809041
+   },
+   "pass_at_k": {
+    "1": 0.266911,
+    "4": 0.521858,
+    "16": 0.712846,
+    "64": 0.805966,
+    "256": 0.850389,
+    "1024": 0.872759
+   }
+  }
+ }
+}

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tailrl"
+version = "0.1.0"
+description = "TailRL — a tail-weighted advantage estimator for RL with continuous rewards"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "pillow>=9.5",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb>=0.16"]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+include = ["experiments*"]
+
+[tool.pytest.ini_options]
+testpaths = ["experiments/imagenet_localization/tests"]

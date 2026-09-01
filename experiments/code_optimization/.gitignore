@@ -1,0 +1,4 @@
+# Built or downloaded by scripts/. None of it belongs in git.
+data/
+gem5/build/
+runs/

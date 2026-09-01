@@ -1,0 +1,57 @@
+# Code-optimization experiment, on top of the repo root's requirements.txt.
+#
+# Install torch FIRST, matched to your CUDA runtime, then this file. vLLM and
+# flash-attn build against your torch/CUDA, so letting pip resolve torch as a
+# transitive dependency of vllm is how you end up with a torch that does not match
+# your driver:
+#
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+#
+# Pin deliberately: this experiment runs RL through the vendored verl fork in ./verl,
+# whose worker and rollout plumbing tracks specific vllm/transformers/tensordict
+# releases.
+#
+# NOTE: this is the TRAINING environment. The gem5 simulator needs its own, separate,
+# python 3.8 environment, which scripts/setup_gem5.sh creates for you. The two never
+# interact -- gem5 is only ever run as a subprocess.
+
+# --- RL framework (the vendored verl fork imports these) ---
+accelerate>=1.2
+codetiming>=1.4
+datasets>=3.0
+dill>=0.3
+einops>=0.8
+hydra-core==1.3.2
+omegaconf>=2.3
+pyarrow>=18.0
+ray[default]>=2.40
+tensordict>=0.1,<0.7
+torchdata>=0.11
+# 4.51 for the Qwen3 chat template (enable_thinking); <5 because the checkpoint
+# format changes and the carve-out snapshots would no longer load.
+transformers>=4.51,<5
+tokenizers>=0.21
+
+# --- rollout + attention ---
+# vLLM v0 engine: the fork's rollout worker uses the v0 log-prob plumbing.
+# scripts/env.sh sets VLLM_USE_V1=0 accordingly.
+vllm>=0.8.3,<0.9
+flash-attn>=2.7
+
+# --- data + analysis ---
+numpy>=1.24
+pandas>=2.0
+# The evaluation aggregator plots best@k / pass@k curves.
+matplotlib>=3.7
+# scripts/download_data.sh fetches the test-case corpus from Google Drive, which
+# needs gdown's confirm-token handling for large files.
+gdown>=5.0
+
+# --- optional: experiment tracking. Training runs fine without it
+# (CODEOPT_LOGGER="['console']"); credentials come from `wandb login`, never from
+# this repository.
+wandb>=0.19
+
+# --- tests ---
+pytest>=7.4

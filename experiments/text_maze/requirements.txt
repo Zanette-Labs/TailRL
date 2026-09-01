@@ -1,0 +1,33 @@
+# Extra dependencies for the Text-Maze experiment, on top of the repo root's
+# requirements.txt. This experiment runs RL through a vendored fork of verl
+# (see ./verl), so its stack is heavier than the rest of TailRL.
+#
+# Install torch FIRST, matched to your CUDA runtime — see this experiment's
+# README. The versions below are what the paper's runs used; newer transformers
+# releases change checkpoint config formats (scripts/checkpoint_doctor.py exists
+# because of exactly that), so pin deliberately rather than floating.
+
+torch>=2.4
+transformers>=4.51,<5
+tokenizers>=0.20
+accelerate>=0.34
+ray[default]>=2.30
+hydra-core>=1.3
+omegaconf>=2.3
+tensordict>=0.5
+pyarrow>=14.0
+pandas>=2.0
+numpy>=1.24
+einops>=0.8
+datasets>=2.20
+huggingface_hub>=0.26
+codetiming>=1.4
+dill>=0.3
+pylatexenc>=2.10
+
+# Reward scoring in verl's shared code path imports math-verify even though the
+# maze reward never calls it.
+math-verify>=0.5
+
+# Experiment tracking (optional at runtime: trainer.logger=[console] works alone)
+wandb>=0.16

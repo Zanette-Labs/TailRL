@@ -1,0 +1,223 @@
+diff --git a/src/base/loader/elf_object.cc b/src/base/loader/elf_object.cc
+index 49fbd6dd7b..661efdcc5e 100644
+--- a/src/base/loader/elf_object.cc
++++ b/src/base/loader/elf_object.cc
+@@ -129,10 +129,19 @@ ElfObject::ElfObject(ImageFileDataPtr ifd) : ObjectFile(ifd)
+         if (phdr.p_type == PT_INTERP) {
+             // Make sure the interpreter is an valid ELF file.
+             auto interp_path = getInterpPath(phdr);
+-            ObjectFile *obj = createObjectFile(interp_path);
+-            interpreter = dynamic_cast<ElfObject *>(obj);
+-            assert(interpreter != nullptr);
+-            _symtab.insert(obj->symtab());
++            // On a cross-rootfs SE run (x86 libs under an aarch64 host), an
++            // object's PT_INTERP may reference a guest path (e.g.
++            // /lib64/ld-linux-x86-64.so.2) that does not resolve on the host
++            // filesystem. Loading it here only contributes the interpreter's
++            // symbol table; skip it when inaccessible rather than fatally
++            // panicking inside ImageFileData. The main executable's PT_INTERP
++            // is a host-resolvable path, so it still loads normally.
++            if (access(interp_path.c_str(), R_OK) == 0) {
++                ObjectFile *obj = createObjectFile(interp_path);
++                interpreter = dynamic_cast<ElfObject *>(obj);
++                assert(interpreter != nullptr);
++                _symtab.insert(obj->symtab());
++            }
+         }
+     }
+ 
+diff --git a/src/sim/init_signals.cc b/src/sim/init_signals.cc
+index 305f0cfaa6..89901cced2 100644
+--- a/src/sim/init_signals.cc
++++ b/src/sim/init_signals.cc
+@@ -63,8 +63,13 @@
+ 
+ using namespace std;
+ 
+-// Use an separate stack for fatal signal handlers
+-static uint8_t fatalSigStack[2 * SIGSTKSZ];
++// Use an separate stack for fatal signal handlers.
++// glibc 2.34+ made SIGSTKSZ a runtime sysconf() value (no longer a compile-time
++// constant), which breaks this static array. Use a generous fixed size instead.
++#ifndef GEM5_FATAL_SIGSTACK_SIZE
++#define GEM5_FATAL_SIGSTACK_SIZE 131072  /* 128 KiB, ample for a backtrace handler */
++#endif
++static uint8_t fatalSigStack[GEM5_FATAL_SIGSTACK_SIZE];
+ 
+ static bool
+ setupAltStack()
+diff --git a/src/sim/syscall_emul.hh b/src/sim/syscall_emul.hh
+index 05a29f9feb..b7a4664eb7 100644
+--- a/src/sim/syscall_emul.hh
++++ b/src/sim/syscall_emul.hh
+@@ -82,6 +82,7 @@
+ #include <unistd.h>
+ 
+ #include <cerrno>
++#include <cstdlib>
+ #include <memory>
+ #include <string>
+ 
+@@ -103,6 +104,7 @@
+ #include "sim/guest_abi.hh"
+ #include "sim/process.hh"
+ #include "sim/proxy_ptr.hh"
++#include "sim/sim_exit.hh"
+ #include "sim/syscall_debug_macros.hh"
+ #include "sim/syscall_desc.hh"
+ #include "sim/syscall_emul_buf.hh"
+@@ -1698,14 +1700,24 @@ mmapFunc(SyscallDesc *desc, ThreadContext *tc,
+         if (p->interpImage.contains(tc->pcState().instAddr())) {
+             std::shared_ptr<FDEntry> fdep = (*p->fds)[tgt_fd];
+             auto ffdp = std::dynamic_pointer_cast<FileFDEntry>(fdep);
+-            auto *lib = Loader::createObjectFile(p->checkPathRedirect(
+-                    ffdp->getFileName()));
+-            DPRINTF_SYSCALL(Verbose, "Loading symbols from %s\n",
+-                ffdp->getFileName());
+-
+-            if (lib) {
+-                Addr offset = lib->buildImage().minAddr() + start;
+-                Loader::debugSymbolTable.insert(*lib->symtab().offset(offset));
++            std::string lib_path =
++                p->checkPathRedirect(ffdp->getFileName());
++            // This block only populates gem5's DEBUG symbol table (used for
++            // backtraces/tracing) -- it has NO effect on simulation or timing.
++            // On a cross-rootfs SE run (x86 libs under an aarch64 host), a
++            // mmap'd path may not resolve on the host filesystem; guard with
++            // access() so a missing file is skipped instead of fatally
++            // panicking inside ImageFileData (createObjectFile).
++            if (access(lib_path.c_str(), R_OK) == 0) {
++                auto *lib = Loader::createObjectFile(lib_path);
++                DPRINTF_SYSCALL(Verbose, "Loading symbols from %s\n",
++                    ffdp->getFileName());
++
++                if (lib) {
++                    Addr offset = lib->buildImage().minAddr() + start;
++                    Loader::debugSymbolTable.insert(
++                            *lib->symtab().offset(offset));
++                }
+             }
+         }
+     }
+@@ -2391,6 +2403,20 @@ readFunc(SyscallDesc *desc, ThreadContext *tc,
+ {
+     auto p = tc->getProcessPtr();
+ 
++    // #41 startup-amortization hook: pause the sim at the FIRST stdin read so the
++    // driver can fork a COW child per test case from the post-startup state.
++    // Gated by GEM5_PREINPUT_FORK (unset -> zero effect on normal runs). The flag
++    // is static, so a forked child inherits it (=true, COW) and re-executes the
++    // read normally; only the parent pauses, exactly once, before consuming input.
++    {
++        static bool preinput_fork_done = false;
++        if (tgt_fd == 0 && !preinput_fork_done && std::getenv("GEM5_PREINPUT_FORK")) {
++            preinput_fork_done = true;
++            exitSimLoopNow("preinput_read");
++            return SyscallReturn::retry();
++        }
++    }
++
+     auto hbfdp = std::dynamic_pointer_cast<HBFDEntry>((*p->fds)[tgt_fd]);
+     if (!hbfdp)
+         return -EBADF;
+diff --git a/src/sim/vma.cc b/src/sim/vma.cc
+index 6f6306c6b8..d34fa3bcca 100644
+--- a/src/sim/vma.cc
++++ b/src/sim/vma.cc
+@@ -30,6 +30,9 @@
+ 
+ #include <sys/mman.h>
+ #include <sys/stat.h>
++#include <unistd.h>
++
++#include <cstdlib>
+ 
+ #include "base/types.hh"
+ #include "config/the_isa.hh"
+@@ -132,24 +135,41 @@ VMA::MappedFileBuffer::MappedFileBuffer(int fd, size_t length,
+              "Tried to mmap with offset greater than file size");
+     _length = std::min((size_t)(file_stat.st_size - offset), _length);
+ 
+-    // cannot call mmap with _length == 0
++    // cannot allocate with _length == 0
+     if (_length) {
+-        _buffer = mmap(NULL, _length, PROT_READ,
+-                                 MAP_PRIVATE, fd, offset);
+-        if (_buffer == MAP_FAILED) {
+-            panic("Failed to map file into host address space: %s",
+-                  strerror(errno));
++        // Upstream gem5 mmap()s the file at `offset`, but mmap() requires the
++        // offset to be a multiple of the HOST page size. On big-page hosts
++        // (e.g. 64 KB-page Arm/Grace), x86 ELF library segments have 4 KB-
++        // aligned offsets and trip mmap() with EINVAL. This buffer is only
++        // ever read (copied into target memory by fillMemPages), so use a
++        // heap buffer filled via pread() instead -- no alignment requirement,
++        // semantically identical to the read-only private mapping. calloc()
++        // zero-fills so any short read (e.g. .bss tail) is already zeroed.
++        _buffer = calloc(1, _length);
++        if (!_buffer) {
++            panic("Failed to allocate %llu-byte host buffer for file mapping",
++                  (unsigned long long)_length);
++        }
++        size_t done = 0;
++        while (done < _length) {
++            ssize_t n = pread(fd, (char *)_buffer + done,
++                              _length - done, offset + done);
++            if (n < 0) {
++                panic("Failed to pread file into host address space: %s",
++                      strerror(errno));
++            }
++            if (n == 0)
++                break;  // EOF; remainder already zeroed by calloc
++            done += n;
+         }
+     } else {
+-        panic("Tried to mmap 0 bytes");
++        panic("Tried to map 0 bytes");
+     }
+ }
+ 
+ VMA::MappedFileBuffer::~MappedFileBuffer()
+ {
+     if (_buffer) {
+-        panic_if(munmap(_buffer, _length) == -1,
+-                 "mmap: failed to unmap file-backed host memory: %s",
+-                 strerror(errno));
++        free(_buffer);
+     }
+ }
+diff --git a/src/systemc/ext/tlm_utils/instance_specific_extensions_int.h b/src/systemc/ext/tlm_utils/instance_specific_extensions_int.h
+index a391091a6a..e7036ac8cb 100644
+--- a/src/systemc/ext/tlm_utils/instance_specific_extensions_int.h
++++ b/src/systemc/ext/tlm_utils/instance_specific_extensions_int.h
+@@ -19,6 +19,7 @@
+ #ifndef __SYSTEMC_EXT_TLM_UTILS_INSTANCE_SPECIFIC_EXTENSIONS_INT_H__
+ #define __SYSTEMC_EXT_TLM_UTILS_INSTANCE_SPECIFIC_EXTENSIONS_INT_H__
+ 
++#include <typeinfo>
+ #include <vector>
+ 
+ #include "../tlm_core/2/generic_payload/array.hh"
+diff --git a/src/python/m5/objects/__init__.py b/src/python/m5/objects/__init__.py
+--- a/src/python/m5/objects/__init__.py	2026-09-01 12:00:40.990726565 -0500
++++ b/src/python/m5/objects/__init__.py	2026-09-01 12:00:41.028846506 -0500
+@@ -30,11 +30,15 @@
+ from m5.internal import params
+ from m5.SimObject import *
+ 
++# On Python 3.8+ the embedded importer may expose no `.modules` attribute, which
++# raises AttributeError rather than NameError. Treat both as "nothing to re-export".
++modules = None
+ try:
+     modules = __loader__.modules
+-except NameError:
++except (NameError, AttributeError):
+     modules = { }
+ 
+-for module in modules.keys():
+-    if module.startswith('m5.objects.'):
+-        exec("from %s import *" % module)
++if modules:
++    for module in modules.keys():
++        if module.startswith('m5.objects.'):
++            exec("from %s import *" % module)

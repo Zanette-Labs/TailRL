@@ -1,0 +1,122 @@
+# Default hyperparameters for the ImageNet localization experiment.
+#
+# These values ARE the defaults the code runs with: run.py loads this file and
+# uses it to populate its argparse defaults. Precedence is
+#
+#     command-line flag  >  this file  >  the value hardcoded in run.py
+#
+# so editing a value here changes what `python -m experiments.imagenet_localization.run`
+# does, and passing the matching flag still overrides it for one run.
+#
+# Point run.py at a different file with --config /path/to/other.yaml — useful for
+# keeping one file per sweep arm without editing this one.
+#
+# Filesystem paths are deliberately NOT here. They are machine-specific, so they
+# come from the environment (IMAGENET_DIR, TAILRL_RESULTS_DIR, ...) via paths.py
+# and .env.example. Everything below is machine-independent.
+#
+# The values as committed reproduce the paper's configuration.
+
+# ---------------------------------------------------------------------------
+# Core
+# ---------------------------------------------------------------------------
+core:
+  # Bins per coordinate. Each of the four heads is a K-way categorical over a
+  # uniform discretization of [0, 1], so the policy can emit K^4 distinct boxes.
+  K: 50
+
+  # Rollouts per image per step — the group the advantage estimator reduces.
+  # Only used by the RL methods. The paper sweeps N in {16, 64, 256, 1024}.
+  N: 64
+
+  # Seeds torch/numpy/random, the data-row shuffle, and head/bottleneck init.
+  # The paper reports over 3 seeds (42, 43, 44).
+  seed: 42
+
+  epochs: 30
+
+  # Per GPU. Under torchrun the effective batch is batch_size * world_size, so
+  # divide when scaling to keep the paper's effective batch of 128.
+  batch_size: 128
+
+# ---------------------------------------------------------------------------
+# Optimization
+#
+# Adam only. Applied to every parameter from step 0 — the ResNet-50 backbone is
+# never frozen, and there are no per-parameter-group learning rates.
+# ---------------------------------------------------------------------------
+optim:
+  # Peak LR, reached at the end of the warmup ramp.
+  lr: 5.0e-4
+
+  # Coupled L2, applied to every parameter including BatchNorm weights and
+  # biases (torch.optim.Adam, not decoupled AdamW).
+  weight_decay: 1.0e-4
+
+  # Epochs of linear LR ramp before cosine decay. The ramp starts at
+  # lr * 1e-3, not at 0. Set to 0 for pure cosine from step 0.
+  # Must be < epochs, or the cosine phase gets a non-positive T_max.
+  warmup_epochs: 1
+
+  # Global gradient-norm clip.
+  grad_clip: 10.0
+
+  # Stop after this many optimizer steps; null runs the full `epochs`. The LR
+  # schedule is still built from `epochs` over the whole split, so a capped run
+  # sees exactly the learning rates an uncapped run would over its first
+  # max_steps steps — it samples a prefix of the real recipe rather than
+  # compressing it. Useful for a short, faithful comparison between methods.
+  max_steps: null
+
+# ---------------------------------------------------------------------------
+# Method-specific
+# ---------------------------------------------------------------------------
+method:
+  # Reward shaping applied ONLY on the advantage path; the reward logged to
+  # metrics.json stays raw IoU. One of: none, percentile, binary_0.5, binary_0.75.
+  #
+  # NOTE: binary_maxrl binarizes at exact equality r == 1.0, which continuous IoU
+  # never hits — so `binary_maxrl` with `none` produces identically zero
+  # advantages and does not train. Pair it with binary_0.5 or binary_0.75, which
+  # is what the paper's binarization study does.
+  reward_transform: none
+
+  # pass@k threshold for --method pkpo. null falls back to min(8, N).
+  # Only the CLI flag adds the _k{k} tag to the run name, so set this per-run on
+  # the command line if you sweep k, or runs at different k collide on disk.
+  pkpo_k: null
+
+  # DETR weights for the l1_giou* arms: L * l1_weight + (1 - GIoU) * giou_weight.
+  l1_weight: 5.0
+  giou_weight: 2.0
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  num_workers: 8
+
+  # null uses the full train split (544,546 annotated images). Set an integer to
+  # take that many rows after the deterministic shuffle — useful while iterating.
+  train_subsample: null
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+eval:
+  # Evaluate on val every N epochs. Ignored by the regression arms, which are
+  # branched before this test and evaluate every epoch.
+  eval_every: 1
+
+  # Samples per image for the sampled val metrics (val/iou_expected,
+  # val/iou_best_of_N). The paper reports Best-of-1024.
+  n_eval_samples: 1024
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  # Weights & Biases is optional; without it no W&B call is made at all.
+  # Credentials come from ~/.netrc via `wandb login` — never put a key here.
+  # The project/entity themselves come from $WANDB_PROJECT / $WANDB_ENTITY.
+  wandb: false
